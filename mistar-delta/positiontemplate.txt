@@ -1,0 +1,51 @@
+from pyspark.sql.functions import expr,greatest
+from pyspark.sql import SparkSession
+import boto3
+
+spark = SparkSession.builder.appName('mistar_delta').config("hive.metastore.client.factory.class", "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory").enableHiveSupport().getOrCreate()
+
+maxrover_df=spark.sql("select coalesce(max(rovertimestamp), cast('2017-08-01' as timestamp)) AS maxrover from parquet.position")
+
+#read in the initial data
+pds_df = spark.sql("SELECT * FROM staging_combined.position")
+
+#Bring in Deltas only
+pdsF_df = pds_df.join(maxrover_df, pds_df.rovertimestamp > maxrover_df.maxrover).drop(maxrover_df.maxrover)
+
+#write out newdata
+dist_df.write.partitionBy("sourcesystemdate").parquet("s3://data-lake-us-west-2-062519970039/parquet/mistar/position",mode="append")
+
+
+
+# Updating Athena Partitions
+s3_output = 's3://pa-athena-custom-results/lambda/'
+database = 'parquet'
+query = "MSCK REPAIR TABLE parquet.position"
+
+def run_query(query, database, s3_output):
+    client = boto3.client('athena', region_name='us-west-2')
+    
+    response = client.start_query_execution(QueryString=query, 
+    QueryExecutionContext={'Database': database},
+        ResultConfiguration={'OutputLocation': s3_output,})
+        
+    return response['QueryExecutionId']
+	
+def get_query(exid):
+    client = boto3.client('athena', region_name='us-west-2')
+    
+    response = client.get_query_results(
+        QueryExecutionId=exid)
+    
+    return response
+	
+query_id = run_query(query, database, s3_output)
+
+ready = 0
+while ready < 1:
+    try:
+        result = get_query(query_id)
+        ready = 1
+    except:
+        continue
+
